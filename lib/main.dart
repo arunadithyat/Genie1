@@ -4,7 +4,6 @@ import 'package:geolocator/geolocator.dart';
 import 'Screen/splash.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:overlay_support/overlay_support.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -39,10 +38,8 @@ class _MyappState extends State<Myapp> {
   }
 
     Future<void> _requestPermissions() async {
-    // Request microphone and phone permissions
     PermissionStatus microphoneStatus = await Permission.microphone.request();
     PermissionStatus phoneStatus = await Permission.phone.request();
-
   }
 
   void showCustomNotification(String message) {
@@ -62,29 +59,27 @@ class _MyappState extends State<Myapp> {
       theme: ThemeData(
         scaffoldBackgroundColor: Colors.white,
         useMaterial3: true,
-    
-        textTheme: GoogleFonts.poppinsTextTheme(),
-    
-        appBarTheme: AppBarTheme(
-          systemOverlayStyle: const SystemUiOverlayStyle(
+        fontFamily: 'Roboto', // Flutter's built-in font, similar to Poppins
+        appBarTheme: const AppBarTheme(
+          systemOverlayStyle: SystemUiOverlayStyle(
             statusBarColor: Colors.transparent,
             statusBarIconBrightness: Brightness.dark,
             systemNavigationBarColor: Colors.white,
             systemNavigationBarIconBrightness: Brightness.dark,
           ),
           backgroundColor: Colors.transparent,
-          titleTextStyle: GoogleFonts.poppins(
+          titleTextStyle: TextStyle(
             fontSize: 17,
             fontWeight: FontWeight.normal,
             color: Colors.white,
+            fontFamily: 'Roboto',
           ),
         ),
-    
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
             backgroundColor: Colors.deepPurple,
             foregroundColor: Colors.white,
-            textStyle: GoogleFonts.poppins(fontSize: 16),
+            textStyle: const TextStyle(fontSize: 16, fontFamily: 'Roboto'),
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(8),
