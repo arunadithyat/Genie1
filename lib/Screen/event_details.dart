@@ -9,7 +9,8 @@ import '../utils/api/image_upload_api.dart';
 import '../utils/widget/camera_service.dart';
 import '../utils/widget/geofence_manager.dart';
 import '../utils/widget/warning.dart';
-import 'package:geofence_service/geofence_service.dart';
+// Import geofence_service but hide conflicting types
+import 'package:geofence_service/geofence_service.dart' hide LocationAccuracy, LocationPermission;
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import '../utils/api/location_api.dart';

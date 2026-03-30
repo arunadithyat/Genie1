@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:geofence_service/geofence_service.dart';
+import 'package:geofence_service/geofence_service.dart' hide LocationAccuracy, LocationPermission;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 /// GeofenceManager wraps the `geofence_service` package and fires
