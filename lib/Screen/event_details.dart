@@ -5,7 +5,11 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:homegenie/Screen/login.dart';
 
 import '../utils/api/event.dart';
+import '../utils/api/image_upload_api.dart';
+import '../utils/widget/camera_service.dart';
+import '../utils/widget/geofence_manager.dart';
 import '../utils/widget/warning.dart';
+import 'package:geofence_service/geofence_service.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import '../utils/api/location_api.dart';
@@ -45,6 +49,13 @@ class _EventDetailsState extends State<EventDetails> {
   bool _manualRecording = false;
   bool _isRecording = false;
 
+  // ── Photo capture ──────────────────────────────────────────────────────────
+  final List<File> _capturedPhotos = [];
+  bool _isUploadingPhoto = false;
+
+  // ── Geofence ───────────────────────────────────────────────────────────────
+  GeofenceStatus? _geofenceStatus;
+
   Duration _recordingDuration = Duration.zero;
   Timer? _durationTimer;
   ValueNotifier<Duration>? _timerNotifier;
@@ -57,6 +68,7 @@ class _EventDetailsState extends State<EventDetails> {
     super.initState();
     _checkPing();
     _listenToPhoneState();
+    GeofenceManager.initialize();
   }
 
   Future<void> _startManualRecording() async {
@@ -138,12 +150,82 @@ class _EventDetailsState extends State<EventDetails> {
   @override
   void dispose() {
     _audioPlayer.dispose();
+    GeofenceManager.instance.stopMonitoring();
     super.dispose();
   }
 
 
 
   
+  // ── Geofence ───────────────────────────────────────────────────────────────
+
+  Future<void> _startGeofenceForEvent(double lat, double lng) async {
+    GeofenceManager.instance.onStatusChange = (id, status) {
+      if (!mounted) return;
+      setState(() => _geofenceStatus = status);
+
+      final msg = status == GeofenceStatus.ENTER
+          ? '📍 You have entered the event zone.'
+          : status == GeofenceStatus.EXIT
+              ? '🚪 You have left the event zone.'
+              : '⏱ You are still within the event zone.';
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          backgroundColor: status == GeofenceStatus.ENTER
+              ? Colors.green
+              : status == GeofenceStatus.EXIT
+                  ? Colors.orange
+                  : Colors.blue,
+        ),
+      );
+    };
+
+    await GeofenceManager.instance.startMonitoring(
+      eventId: widget.eventid,
+      latitude: lat,
+      longitude: lng,
+      radiusMeters: 200,
+    );
+  }
+
+  // ── Photo capture & upload ─────────────────────────────────────────────────
+
+  Future<void> _captureAndUploadPhoto() async {
+    // Opens camera directly — no gallery option
+    final file = await CameraService.capturePhoto();
+    if (file == null) return;
+
+    setState(() {
+      _capturedPhotos.add(file);
+      _isUploadingPhoto = true;
+    });
+
+    try {
+      final url = await ImageUploadApi.uploadImageToEvent(
+        filePath: file.path,
+        docname: widget.eventid,
+        context: context,
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              url != null
+                  ? '✅ Photo uploaded to Event successfully!'
+                  : '❌ Photo upload failed. Please try again.',
+            ),
+            backgroundColor: url != null ? Colors.green : Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUploadingPhoto = false);
+    }
+  }
+
   Future<void> _checkPing() async {
     try {
               var connectivity = await Connectivity().checkConnectivity();
@@ -824,6 +906,7 @@ String _formatTime(String? dateTime) {
                                                           'with_event',
                                                           true,
                                                         );
+                                                        await _startGeofenceForEvent(lat, lng);
                                                         _fetchData();
                                                         
                                                       } else if (response['message']['status'] ==
@@ -1133,6 +1216,149 @@ String _formatTime(String? dateTime) {
                                               onPressed: _startManualRecording,
                                             ),
                                           ],
+                                        ],
+
+                                        // ── Camera capture button ──────────
+                                        const SizedBox(height: 12),
+                                        _isUploadingPhoto
+                                            ? const Row(
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment.center,
+                                                children: [
+                                                  SizedBox(
+                                                    width: 20,
+                                                    height: 20,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                    ),
+                                                  ),
+                                                  SizedBox(width: 10),
+                                                  Text('Uploading photo...'),
+                                                ],
+                                              )
+                                            : ElevatedButton.icon(
+                                                icon: const Icon(
+                                                  Icons.camera_alt,
+                                                  color: Colors.white,
+                                                  size: 20,
+                                                ),
+                                                label: Text(
+                                                  _capturedPhotos.isEmpty
+                                                      ? 'Capture Photo'
+                                                      : 'Capture Photo (${_capturedPhotos.length})',
+                                                  style: const TextStyle(
+                                                    fontSize: 15,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                                style: ElevatedButton.styleFrom(
+                                                  backgroundColor: Colors.indigo,
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                    horizontal: 18,
+                                                    vertical: 10,
+                                                  ),
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            25),
+                                                  ),
+                                                  elevation: 4,
+                                                ),
+                                                onPressed:
+                                                    _captureAndUploadPhoto,
+                                              ),
+
+                                        // Thumbnail preview of captured photos
+                                        if (_capturedPhotos.isNotEmpty) ...[
+                                          const SizedBox(height: 10),
+                                          SizedBox(
+                                            height: 70,
+                                            child: ListView.builder(
+                                              scrollDirection: Axis.horizontal,
+                                              itemCount: _capturedPhotos.length,
+                                              itemBuilder: (ctx, i) => Container(
+                                                margin: const EdgeInsets.only(
+                                                    right: 8),
+                                                width: 70,
+                                                height: 70,
+                                                decoration: BoxDecoration(
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  image: DecorationImage(
+                                                    image: FileImage(
+                                                        _capturedPhotos[i]),
+                                                    fit: BoxFit.cover,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+
+                                        // ── Geofence status badge ──────────
+                                        if (_geofenceStatus != null) ...[
+                                          const SizedBox(height: 12),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 14, vertical: 6),
+                                            decoration: BoxDecoration(
+                                              color: _geofenceStatus ==
+                                                      GeofenceStatus.ENTER
+                                                  ? Colors.green.shade100
+                                                  : _geofenceStatus ==
+                                                          GeofenceStatus.EXIT
+                                                      ? Colors.orange.shade100
+                                                      : Colors.blue.shade100,
+                                              borderRadius:
+                                                  BorderRadius.circular(20),
+                                              border: Border.all(
+                                                color: _geofenceStatus ==
+                                                        GeofenceStatus.ENTER
+                                                    ? Colors.green
+                                                    : _geofenceStatus ==
+                                                            GeofenceStatus.EXIT
+                                                        ? Colors.orange
+                                                        : Colors.blue,
+                                              ),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(
+                                                  _geofenceStatus ==
+                                                          GeofenceStatus.ENTER
+                                                      ? Icons.location_on
+                                                      : _geofenceStatus ==
+                                                              GeofenceStatus.EXIT
+                                                          ? Icons.location_off
+                                                          : Icons
+                                                              .location_searching,
+                                                  size: 16,
+                                                  color: _geofenceStatus ==
+                                                          GeofenceStatus.ENTER
+                                                      ? Colors.green
+                                                      : _geofenceStatus ==
+                                                              GeofenceStatus.EXIT
+                                                          ? Colors.orange
+                                                          : Colors.blue,
+                                                ),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  _geofenceStatus ==
+                                                          GeofenceStatus.ENTER
+                                                      ? 'Inside event zone'
+                                                      : _geofenceStatus ==
+                                                              GeofenceStatus.EXIT
+                                                          ? 'Outside event zone'
+                                                          : 'Dwelling in zone',
+                                                  style: const TextStyle(
+                                                      fontSize: 12),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
                                         ],
 
                                         StreamBuilder<Duration>(
