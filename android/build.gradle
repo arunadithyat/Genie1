@@ -5,6 +5,25 @@ allprojects {
         mavenCentral()
 
     }
+
+    // Fix JVM target inconsistency across all plugins
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                if (it.hasProperty('compileOptions')) {
+                    compileOptions {
+                        sourceCompatibility JavaVersion.VERSION_21
+                        targetCompatibility JavaVersion.VERSION_21
+                    }
+                }
+            }
+        }
+        project.tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+            kotlinOptions {
+                jvmTarget = '21'
+            }
+        }
+    }
 }
 
 rootProject.buildDir = '../build'
