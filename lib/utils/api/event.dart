@@ -176,6 +176,11 @@ static Future<List<dynamic>> HistoryList(String usr, String fromDate, String toD
         '&reference_doctype=$referenceDoctype',
       );
 
+      debugPrint(
+        '[EventApi] getParticipantVisitType -> eventName=$eventName, '
+        'reference_docname=$referenceDocname, reference_doctype=$referenceDoctype',
+      );
+
       final response = await http.get(
         uri,
         headers: {
@@ -186,11 +191,15 @@ static Future<List<dynamic>> HistoryList(String usr, String fromDate, String toD
       );
 
       if (response.statusCode != 200) {
+        debugPrint(
+          '[EventApi] getParticipantVisitType failed: ${response.statusCode} ${response.body}',
+        );
         return null;
       }
 
       final data = json.decode(response.body);
       final payload = data['data'];
+      debugPrint('[EventApi] getParticipantVisitType payload: $payload');
 
       if (payload is List) {
         for (final item in payload) {
@@ -199,6 +208,9 @@ static Future<List<dynamic>> HistoryList(String usr, String fromDate, String toD
             if (name == eventName) {
               final visitType = item['visit_type']?.toString();
               if (visitType != null && visitType.isNotEmpty) {
+                debugPrint(
+                  '[EventApi] visit type matched by event name: $visitType',
+                );
                 return visitType;
               }
             }
@@ -211,6 +223,9 @@ static Future<List<dynamic>> HistoryList(String usr, String fromDate, String toD
             if (docname == referenceDocname) {
               final visitType = item['visit_type']?.toString();
               if (visitType != null && visitType.isNotEmpty) {
+                debugPrint(
+                  '[EventApi] visit type matched by reference_docname: $visitType',
+                );
                 return visitType;
               }
             }
@@ -221,12 +236,17 @@ static Future<List<dynamic>> HistoryList(String usr, String fromDate, String toD
       if (payload is Map<String, dynamic>) {
         final visitType = payload['visit_type']?.toString();
         if (visitType != null && visitType.isNotEmpty) {
+          debugPrint(
+            '[EventApi] visit type matched by map payload: $visitType',
+          );
           return visitType;
         }
       }
 
+      debugPrint('[EventApi] visit type not found in payload');
       return null;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[EventApi] getParticipantVisitType exception: $e');
       return null;
     }
   }
@@ -383,6 +403,10 @@ final pingResult = await Check.pingpong();
     },
   );
 
+  debugPrint(
+    '[EventApi] eventCheckin response: ${response.statusCode} ${response.body}',
+  );
+
   return json.decode(response.body);
 }
 
@@ -428,9 +452,9 @@ final pingResult = await Check.pingpong();
     return json.decode(response.body);
   }
 
-  static Future<bool> addEventComment({
+  static Future<bool> saveCustomerLocationFromVisit({
     required String eventId,
-    required String content,
+    required String referenceDocname,
     required BuildContext context,
   }) async {
     final pingResult = await Check.pingpong();
@@ -452,24 +476,242 @@ final pingResult = await Check.pingpong();
     }
 
     try {
-      final response = await http.post(
-        Uri.parse('$siteUrl/api/resource/Comment'),
+      final visitResponse = await http.get(
+        Uri.parse('$siteUrl/api/method/visit?event_id=$eventId'),
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      );
+
+      debugPrint(
+        '[EventApi] saveCustomerLocationFromVisit -> event_id=$eventId, '
+        'reference_docname=$referenceDocname',
+      );
+
+      debugPrint(
+        '[EventApi] visit lookup response: '
+        '${visitResponse.statusCode} ${visitResponse.body}',
+      );
+
+      if (visitResponse.statusCode != 200) {
+        return false;
+      }
+
+      final visitJson = jsonDecode(visitResponse.body);
+      final visitData = _extractVisitPayload(visitJson, eventId);
+
+      if (visitData == null) {
+        debugPrint(
+          '[EventApi] saveCustomerLocationFromVisit -> no visit payload found for $eventId',
+        );
+        return false;
+      }
+
+      final opportunityResponse = await http.get(
+        Uri.parse(
+          '$siteUrl/api/resource/Opportunity/${Uri.encodeComponent(referenceDocname)}',
+        ),
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      );
+
+      debugPrint(
+        '[EventApi] opportunity fetch response: '
+        '${opportunityResponse.statusCode} ${opportunityResponse.body}',
+      );
+
+      if (opportunityResponse.statusCode != 200) {
+        return false;
+      }
+
+      final opportunityJson = jsonDecode(opportunityResponse.body);
+      final opportunityData = opportunityJson['data'];
+
+      if (opportunityData is! Map<String, dynamic>) {
+        return false;
+      }
+
+      final List<Map<String, dynamic>> existingRows =
+          ((opportunityData['custom_location'] as List?) ?? [])
+              .whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList();
+
+      existingRows.removeWhere(
+        (row) => row['event_id']?.toString() == eventId,
+      );
+
+      existingRows.add({
+        'doctype': 'Customer Location',
+        'location': visitData['source']?.toString() ?? '',
+        'latitude': visitData['latitude']?.toString() ?? '',
+        'longitude': visitData['longitude']?.toString() ?? '',
+        'location_type': visitData['location']?.toString() ?? '',
+        'event_id': visitData['event_id']?.toString() ?? eventId,
+      });
+
+      final response = await http.put(
+        Uri.parse(
+          '$siteUrl/api/resource/Opportunity/${Uri.encodeComponent(referenceDocname)}',
+        ),
         headers: {
           'Authorization': token,
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
         body: jsonEncode({
-          'comment_type': 'Comment',
-          'reference_doctype': 'Event',
-          'reference_name': eventId,
-          'content': content,
+          'custom_location': existingRows,
         }),
       );
 
-      return response.statusCode == 200 || response.statusCode == 201;
+      debugPrint(
+        '[EventApi] saveCustomerLocationFromVisit response: '
+        '${response.statusCode} ${response.body}',
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('[EventApi] saveCustomerLocationFromVisit exception: $e');
+      return false;
+    }
+  }
+
+  static Map<String, dynamic>? _extractVisitPayload(
+    dynamic responseJson,
+    String eventId,
+  ) {
+    final payload = responseJson['data'] ?? responseJson['message'];
+
+    if (payload is Map<String, dynamic>) {
+      return payload;
+    }
+
+    if (payload is List) {
+      for (final item in payload) {
+        if (item is Map<String, dynamic>) {
+          final currentEventId = item['event_id']?.toString();
+          if (currentEventId == eventId) {
+            return item;
+          }
+        }
+      }
+
+      for (final item in payload) {
+        if (item is Map<String, dynamic>) {
+          return item;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  static Future<bool> updateEventLocationType({
+    required String eventId,
+    required String locationType,
+    required BuildContext context,
+  }) async {
+    final pingResult = await Check.pingpong();
+    if (pingResult == false) {
+      Warning.show(
+        context,
+        'ERP Site is not in working condition! Please try again later.',
+        'Error',
+      );
+      return false;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final String? token = prefs.getString('token');
+    final siteUrl = dotenv.env['SITE_URL'] ?? '';
+
+    if (token == null || token.isEmpty || siteUrl.isEmpty) {
+      return false;
+    }
+
+    try {
+      final response = await http.put(
+        Uri.parse('$siteUrl/api/resource/Event/$eventId'),
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode({
+          'location': locationType,
+        }),
+      );
+
+      return response.statusCode == 200;
     } catch (_) {
       return false;
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getOpportunityLocations({
+    required String referenceDocname,
+    required BuildContext context,
+  }) async {
+    final pingResult = await Check.pingpong();
+    if (pingResult == false) {
+      Warning.show(
+        context,
+        'ERP Site is not in working condition! Please try again later.',
+        'Error',
+      );
+      return [];
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final String? token = prefs.getString('token');
+    final siteUrl = dotenv.env['SITE_URL'] ?? '';
+
+    if (token == null || token.isEmpty || siteUrl.isEmpty) {
+      return [];
+    }
+
+    try {
+      final response = await http.get(
+        Uri.parse(
+          '$siteUrl/api/resource/Opportunity/${Uri.encodeComponent(referenceDocname)}',
+        ),
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      );
+
+      debugPrint(
+        '[EventApi] getOpportunityLocations response: ${response.statusCode} ${response.body}',
+      );
+
+      if (response.statusCode != 200) {
+        return [];
+      }
+
+      final data = jsonDecode(response.body);
+      final opportunity = data['data'];
+      if (opportunity is! Map<String, dynamic>) {
+        return [];
+      }
+
+      final rows = opportunity['custom_location'];
+      if (rows is! List) {
+        return [];
+      }
+
+      return rows
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+    } catch (e) {
+      debugPrint('[EventApi] getOpportunityLocations exception: $e');
+      return [];
     }
   }
 

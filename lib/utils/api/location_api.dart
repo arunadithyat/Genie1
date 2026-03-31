@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 class LocationHelper {
@@ -23,6 +24,35 @@ class LocationHelper {
     } catch (e) {
       print("Google API exception: $e");
       return "Error getting address";
+    }
+  }
+
+  static Future<Uint8List?> getStaticMapImageBytes(
+    double lat,
+    double lon, {
+    int width = 320,
+    int height = 320,
+    int zoom = 16,
+  }) async {
+    final url = Uri.parse(
+      'https://maps.googleapis.com/maps/api/staticmap'
+      '?center=$lat,$lon'
+      '&zoom=$zoom'
+      '&size=${width}x$height'
+      '&maptype=roadmap'
+      '&markers=color:red%7C$lat,$lon'
+      '&key=$_googleApiKey',
+    );
+
+    try {
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        return response.bodyBytes;
+      }
+      return null;
+    } catch (e) {
+      print("Static map API exception: $e");
+      return null;
     }
   }
 }

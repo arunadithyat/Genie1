@@ -1,6 +1,9 @@
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:homegenie/Screen/login.dart';
 
@@ -40,6 +43,7 @@ class EventDetails extends StatefulWidget {
 class _EventDetailsState extends State<EventDetails> {
   Map<String, dynamic> eventData = {};
   String? _participantVisitType;
+  List<Map<String, dynamic>> _savedOpportunityLocations = [];
   File? capturedImage;
   String? selectedLocationType;
   final TextEditingController otherLocationController =
@@ -234,11 +238,279 @@ class _EventDetailsState extends State<EventDetails> {
     }
   }
 
+  Future<void> _capturePhotoForCheckout() async {
+    final file = await CameraService.capturePhoto();
+    if (file == null) return;
+
+    setState(() {
+      capturedImage = file;
+      _capturedPhotos.add(file);
+    });
+  }
+
+  void _removeCapturedPhotoAt(int index) {
+    if (index < 0 || index >= _capturedPhotos.length) return;
+
+    setState(() {
+      final removedFile = _capturedPhotos.removeAt(index);
+      if (capturedImage?.path == removedFile.path) {
+        capturedImage = _capturedPhotos.isNotEmpty ? _capturedPhotos.last : null;
+      }
+    });
+  }
+
+  String _formatCapturedOn(DateTime dateTime) {
+    final day = dateTime.day.toString().padLeft(2, '0');
+    final month = dateTime.month.toString().padLeft(2, '0');
+    final year = dateTime.year.toString();
+    final hour = dateTime.hour.toString().padLeft(2, '0');
+    final minute = dateTime.minute.toString().padLeft(2, '0');
+    return '$day-$month-$year $hour:$minute';
+  }
+
+  String _buildGpsStampText({
+    required DateTime capturedOn,
+    required double lat,
+    required double lng,
+    required String address,
+  }) {
+    final normalizedAddress = address.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return 'Captured on: ${_formatCapturedOn(capturedOn)}\n'
+        'Latitude: ${lat.toStringAsFixed(6)}\n'
+        'Longitude: ${lng.toStringAsFixed(6)}\n'
+        'Address: $normalizedAddress';
+  }
+
+  TextPainter _buildGpsTextPainter({
+    required String text,
+    required double maxWidth,
+    required double maxHeight,
+  }) {
+    for (double fontSize = 24; fontSize >= 13; fontSize -= 1) {
+      final painter = TextPainter(
+        text: TextSpan(
+          text: text,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: fontSize,
+            fontWeight: FontWeight.w700,
+            height: 1.12,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 6,
+        ellipsis: '...',
+      )..layout(maxWidth: maxWidth);
+
+      if (painter.height <= maxHeight) {
+        return painter;
+      }
+    }
+
+    return TextPainter(
+      text: TextSpan(
+        text: text,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          height: 1.12,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 6,
+      ellipsis: '...',
+    )..layout(maxWidth: maxWidth);
+  }
+
+  Future<File> _createGpsStampedImage({
+    required File file,
+    required double lat,
+    required double lng,
+    required String address,
+  }) async {
+    final bytes = await file.readAsBytes();
+    final ui.Image originalImage = await decodeImageFromList(bytes);
+    final capturedOn = await file.lastModified();
+    final Uint8List? mapBytes = await LocationHelper.getStaticMapImageBytes(
+      lat,
+      lng,
+    );
+    ui.Image? mapImage;
+
+    if (mapBytes != null) {
+      mapImage = await decodeImageFromList(mapBytes);
+    }
+
+    final stampText = _buildGpsStampText(
+      capturedOn: capturedOn,
+      lat: lat,
+      lng: lng,
+      address: address,
+    );
+
+    final footerHeight = math.max(
+      120.0,
+      originalImage.height * 0.25,
+    );
+    final footerTop = originalImage.height.toDouble() - footerHeight;
+    final horizontalPadding = originalImage.width * 0.025;
+    final verticalPadding = footerHeight * 0.07;
+    final mapSize = mapImage == null
+        ? 0.0
+        : math.min(
+            footerHeight - (verticalPadding * 2),
+            originalImage.width * 0.18,
+          );
+    final textStartX = mapImage == null
+        ? horizontalPadding
+        : horizontalPadding + mapSize + horizontalPadding;
+    final textWidth = math.max(
+      1.0,
+      originalImage.width.toDouble() - textStartX - horizontalPadding,
+    );
+    final textHeight = math.max(1.0, footerHeight - (verticalPadding * 2));
+    final textPainter = _buildGpsTextPainter(
+      text: stampText,
+      maxWidth: textWidth,
+      maxHeight: textHeight,
+    );
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    canvas.drawImage(originalImage, Offset.zero, Paint());
+    canvas.drawRect(
+      Rect.fromLTWH(
+        0,
+        footerTop,
+        originalImage.width.toDouble(),
+        footerHeight,
+      ),
+      Paint()..color = Colors.black.withOpacity(0.70),
+    );
+
+    if (mapImage != null) {
+      final mapRect = Rect.fromLTWH(
+        horizontalPadding,
+        footerTop + verticalPadding,
+        mapSize,
+        mapSize,
+      );
+      canvas.drawRect(
+        mapRect.inflate(2),
+        Paint()..color = Colors.white.withOpacity(0.95),
+      );
+      paintImage(
+        canvas: canvas,
+        rect: mapRect,
+        image: mapImage,
+        fit: BoxFit.cover,
+      );
+    }
+
+    final safeTextTop = math.max(
+      footerTop + verticalPadding,
+      footerTop + ((footerHeight - textPainter.height) / 2),
+    );
+
+    canvas.save();
+    canvas.clipRect(
+      Rect.fromLTWH(
+        textStartX,
+        footerTop,
+        textWidth,
+        footerHeight,
+      ),
+    );
+    textPainter.paint(canvas, Offset(textStartX, safeTextTop));
+    canvas.restore();
+
+    final stampedImage = await recorder.endRecording().toImage(
+          originalImage.width,
+          originalImage.height,
+        );
+    final byteData = await stampedImage.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+    final stampedBytes = byteData?.buffer.asUint8List();
+
+    if (stampedBytes == null) {
+      return file;
+    }
+
+    final stampedPath = file.path.replaceFirst(
+      RegExp(r'(\.[^.]*)?$'),
+      '_gps.png',
+    );
+    final stampedFile = File(stampedPath);
+    await stampedFile.writeAsBytes(stampedBytes, flush: true);
+    return stampedFile;
+  }
+
+  Future<void> _uploadCapturedPhotosAfterCheckout({
+    required double lat,
+    required double lng,
+    required String address,
+  }) async {
+    if (_capturedPhotos.isEmpty) return;
+
+    setState(() {
+      _isUploadingPhoto = true;
+    });
+
+    int successCount = 0;
+
+    try {
+      for (final file in List<File>.from(_capturedPhotos)) {
+        final stampedFile = await _createGpsStampedImage(
+          file: file,
+          lat: lat,
+          lng: lng,
+          address: address,
+        );
+        final url = await ImageUploadApi.uploadImageToEvent(
+          filePath: stampedFile.path,
+          docname: widget.eventid,
+          context: context,
+        );
+
+        if (url != null) {
+          successCount++;
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              successCount == _capturedPhotos.length
+                  ? 'Photo uploaded to Event successfully!'
+                  : 'Some photos failed to upload. Please try again.',
+            ),
+            backgroundColor:
+                successCount == _capturedPhotos.length ? Colors.green : Colors.orange,
+          ),
+        );
+      }
+
+      if (successCount == _capturedPhotos.length && mounted) {
+        setState(() {
+          _capturedPhotos.clear();
+          capturedImage = null;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _isUploadingPhoto = false);
+    }
+  }
+
   void showLocationDialog(VoidCallback onSuccess) {
     String? tempSelectedLocationType = selectedLocationType;
     final tempOtherLocationController = TextEditingController(
       text: otherLocationController.text,
     );
+    final locationOptions = _getAvailableLocationTypes();
 
     showDialog(
       context: context,
@@ -257,7 +529,7 @@ class _EventDetailsState extends State<EventDetails> {
                       value: tempSelectedLocationType,
                       hint: const Text("Select Location"),
                       isExpanded: true,
-                      items: ["Site", "Office", "Home", "Others"]
+                      items: locationOptions
                           .map(
                             (e) => DropdownMenuItem(
                               value: e,
@@ -268,13 +540,15 @@ class _EventDetailsState extends State<EventDetails> {
                       onChanged: (value) {
                         dialogSetState(() {
                           tempSelectedLocationType = value;
-                          if (value != "Others") {
+                          if (value != "Others" ||
+                              !locationOptions.contains("Others")) {
                             tempOtherLocationController.clear();
                           }
                         });
                       },
                     ),
-                    if (tempSelectedLocationType == "Others")
+                    if (tempSelectedLocationType == "Others" &&
+                        locationOptions.contains("Others"))
                       TextField(
                         controller: tempOtherLocationController,
                         decoration: const InputDecoration(
@@ -292,10 +566,11 @@ class _EventDetailsState extends State<EventDetails> {
                     child: const Text("Cancel"),
                   ),
                   TextButton(
-                    onPressed: () {
+                    onPressed: () async {
                       if (tempSelectedLocationType == null) return;
 
                       if (tempSelectedLocationType == "Others" &&
+                          locationOptions.contains("Others") &&
                           tempOtherLocationController.text.trim().isEmpty) {
                         return;
                       }
@@ -305,6 +580,31 @@ class _EventDetailsState extends State<EventDetails> {
                         otherLocationController.text =
                             tempOtherLocationController.text.trim();
                       });
+
+                      final locationLabel =
+                          tempSelectedLocationType == "Others"
+                                  && locationOptions.contains("Others")
+                              ? tempOtherLocationController.text.trim()
+                              : tempSelectedLocationType!;
+
+                      final isUpdated = await Event.updateEventLocationType(
+                        eventId: widget.eventid,
+                        locationType: locationLabel,
+                        context: context,
+                      );
+
+                      if (!isUpdated) {
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                "Unable to update Event location.",
+                              ),
+                            ),
+                          );
+                        }
+                        return;
+                      }
 
                       tempOtherLocationController.dispose();
                       Navigator.pop(context);
@@ -336,6 +636,34 @@ class _EventDetailsState extends State<EventDetails> {
     return null;
   }
 
+  String _getParticipantReferenceDocname() {
+    final participant = _getPrimaryParticipant();
+    if (participant == null) return '';
+
+    final directMatch = participant['opportunity_from']?.toString() ??
+        participant['mention']?.toString() ??
+        participant['reference_docname']?.toString();
+
+    if (directMatch != null &&
+        RegExp(r'^CRM-OPP-', caseSensitive: false).hasMatch(directMatch)) {
+      return directMatch;
+    }
+
+    for (final entry in participant.entries) {
+      final value = entry.value?.toString();
+      if (value != null &&
+          RegExp(r'^CRM-OPP-', caseSensitive: false).hasMatch(value)) {
+        debugPrint(
+          '[EventDetails] Opportunity id inferred from participant field '
+          '${entry.key}: $value',
+        );
+        return value;
+      }
+    }
+
+    return directMatch ?? '';
+  }
+
   String _getParticipantVisitType() {
     if (_participantVisitType != null && _participantVisitType!.isNotEmpty) {
       return _participantVisitType!;
@@ -364,7 +692,39 @@ class _EventDetailsState extends State<EventDetails> {
     return _isSiteVisitEvent() && !_isNewVisit();
   }
 
+  List<String> _getAvailableLocationTypes() {
+    if (_requiresLocationBeforeCheckIn() &&
+        _savedOpportunityLocations.isNotEmpty) {
+      return _savedOpportunityLocations
+          .map((row) => row['location_type']?.toString() ?? '')
+          .where((value) => value.isNotEmpty)
+          .toSet()
+          .toList();
+    }
+
+    return ["Site", "Office", "Home", "Others"];
+  }
+
+  Map<String, dynamic>? _getSavedLocationRow(String? locationType) {
+    if (locationType == null || locationType.isEmpty) return null;
+
+    for (final row in _savedOpportunityLocations) {
+      if (row['location_type']?.toString() == locationType) {
+        return row;
+      }
+    }
+    return null;
+  }
+
   LatLng? _getMockLocationCoordinates(String? locationType) {
+    final savedRow = _getSavedLocationRow(locationType);
+    final savedLat = double.tryParse(savedRow?['latitude']?.toString() ?? '');
+    final savedLng = double.tryParse(savedRow?['longitude']?.toString() ?? '');
+
+    if (savedLat != null && savedLng != null) {
+      return LatLng(savedLat, savedLng);
+    }
+
     switch (locationType) {
       case "Site":
         return const LatLng(10.8665226, 78.6406467);
@@ -397,21 +757,37 @@ class _EventDetailsState extends State<EventDetails> {
     otherLocationController.clear();
   }
 
+  Future<void> _loadOpportunityLocations() async {
+    final referenceDocname = _getParticipantReferenceDocname();
+    if (referenceDocname.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _savedOpportunityLocations = [];
+        });
+      }
+      return;
+    }
+
+    final rows = await Event.getOpportunityLocations(
+      referenceDocname: referenceDocname,
+      context: context,
+    );
+
+    if (mounted) {
+      debugPrint(
+        '[EventDetails] opportunity locations loaded for $referenceDocname: $rows',
+      );
+      setState(() {
+        _savedOpportunityLocations = rows;
+      });
+    }
+  }
+
   String _getSelectedLocationValue() {
     if (selectedLocationType == "Others") {
       return otherLocationController.text.trim();
     }
     return selectedLocationType ?? '';
-  }
-
-  String _buildFirstVisitLocationComment() {
-    final customLocation = eventData['event']?['custom_location']?.toString() ?? '';
-    final label = _getSelectedLocationValue().isEmpty
-        ? (selectedLocationType ?? 'Location')
-        : _getSelectedLocationValue();
-    final locationValue = customLocation.isEmpty ? '-' : customLocation;
-
-    return '$label : $locationValue';
   }
 
   Future<void> performCheckIn({
@@ -662,7 +1038,8 @@ class _EventDetailsState extends State<EventDetails> {
           );
           return;
         }
-                setState(() {
+        if (!mounted) return;
+        setState(() {
           _isLoading = false;
         });
         _init();
@@ -676,18 +1053,22 @@ class _EventDetailsState extends State<EventDetails> {
   Future<void> _init() async {
     prefs = await SharedPreferences.getInstance();
     await _fetchData();
+    if (!mounted) return;
     setState(() {});
   }
 
   Future<void> _fetchData() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
       _resetSelectedLocation();
       _participantVisitType = null;
+      _savedOpportunityLocations = [];
     });
 
     await Future.wait([_fetchEventDetails()]);
 
+    if (!mounted) return;
     setState(() {
       _isLoading = false;
     });
@@ -695,15 +1076,20 @@ class _EventDetailsState extends State<EventDetails> {
 
   Future<void> _loadParticipantVisitType() async {
     final participant = _getPrimaryParticipant();
-    final referenceDocname =
-        participant?['mention']?.toString() ??
-        participant?['reference_docname']?.toString() ??
-        participant?['opportunity_from']?.toString() ??
-        participant?['party_name']?.toString();
+    final referenceDocname = _getParticipantReferenceDocname();
     final referenceDoctype =
         participant?['reference_doctype']?.toString() ?? 'Opportunity';
 
+    debugPrint(
+      '[EventDetails] participant reference resolved -> '
+      'reference_docname=$referenceDocname, reference_doctype=$referenceDoctype, '
+      'participant=$participant',
+    );
+
     if (referenceDocname == null || referenceDocname.isEmpty) {
+      debugPrint(
+        '[EventDetails] No participant reference found. Defaulting visit type to New.',
+      );
       if (mounted) {
         setState(() {
           _participantVisitType = 'New';
@@ -720,6 +1106,10 @@ class _EventDetailsState extends State<EventDetails> {
     );
 
     if (mounted) {
+      debugPrint(
+        '[EventDetails] visit type resolved for ${widget.eventid}: '
+        '${visitType ?? _getParticipantVisitType()}',
+      );
       setState(() {
         _participantVisitType = visitType ?? _getParticipantVisitType();
       });
@@ -761,11 +1151,13 @@ String _formatTime(String? dateTime) {
 
   Future<void> _fetchEventDetails() async {
     final response = await Event.eventdetails(widget.eventid, context);
+    if (!mounted) return;
     if (response != Null) {
       setState(() {
         eventData = response;
       });
       await _loadParticipantVisitType();
+      await _loadOpportunityLocations();
     }
   }
 
@@ -903,14 +1295,27 @@ String _formatTime(String? dateTime) {
   }
 
   bool _isTodayEvent() {
-    if (eventData['event']['starts_on'] == null) return false;
+    final startsOn = eventData['event']?['starts_on']?.toString();
+    if (startsOn == null || startsOn.isEmpty) {
+      debugPrint(
+        '[EventDetails] starts_on missing for event ${widget.eventid}: ${eventData['event']}',
+      );
+      return false;
+    }
 
-    DateTime eventDate = DateTime.parse(eventData['event']['starts_on']);
-    DateTime now = DateTime.now();
+    try {
+      final eventDate = DateTime.parse(startsOn).toLocal();
+      final now = DateTime.now().toLocal();
 
-    return eventDate.year == now.year &&
-        eventDate.month == now.month &&
-        eventDate.day == now.day;
+      return eventDate.year == now.year &&
+          eventDate.month == now.month &&
+          eventDate.day == now.day;
+    } catch (e) {
+      debugPrint(
+        '[EventDetails] invalid starts_on for event ${widget.eventid}: $startsOn, error=$e',
+      );
+      return false;
+    }
   }
 
   Future<bool> showOTPDialog(BuildContext context) async {
@@ -1542,13 +1947,29 @@ String _formatTime(String? dateTime) {
                                                         );
 
                                                         if (_requiresLocationBeforeCheckout()) {
-                                                          await Event.addEventComment(
-                                                            eventId: eventId,
-                                                            content:
-                                                                _buildFirstVisitLocationComment(),
-                                                            context: context,
+                                                          final referenceDocname =
+                                                              _getParticipantReferenceDocname();
+
+                                                          debugPrint(
+                                                            '[EventDetails] first visit checkout save trigger -> '
+                                                            'event_id=$eventId, reference_docname=$referenceDocname',
                                                           );
+
+                                                          if (referenceDocname.isNotEmpty) {
+                                                            await Event.saveCustomerLocationFromVisit(
+                                                              eventId: eventId,
+                                                              referenceDocname:
+                                                                  referenceDocname,
+                                                              context: context,
+                                                            );
+                                                          }
                                                         }
+
+                                                        await _uploadCapturedPhotosAfterCheckout(
+                                                          lat: lat,
+                                                          lng: lng,
+                                                          address: address,
+                                                        );
 
                                                         _fetchData();
 
@@ -1806,7 +2227,7 @@ String _formatTime(String? dateTime) {
                                                     elevation: 4,
                                                   ),
                                                   onPressed:
-                                                      _captureAndUploadPhoto,
+                                                      _capturePhotoForCheckout,
                                                 ),
                                         ],
 
@@ -1828,20 +2249,46 @@ String _formatTime(String? dateTime) {
                                             child: ListView.builder(
                                               scrollDirection: Axis.horizontal,
                                               itemCount: _capturedPhotos.length,
-                                              itemBuilder: (ctx, i) => Container(
-                                                margin: const EdgeInsets.only(
-                                                    right: 8),
-                                                width: 70,
-                                                height: 70,
-                                                decoration: BoxDecoration(
-                                                  borderRadius:
-                                                      BorderRadius.circular(8),
-                                                  image: DecorationImage(
-                                                    image: FileImage(
-                                                        _capturedPhotos[i]),
-                                                    fit: BoxFit.cover,
+                                              itemBuilder: (ctx, i) => Stack(
+                                                children: [
+                                                  Container(
+                                                    margin: const EdgeInsets.only(
+                                                        right: 8),
+                                                    width: 70,
+                                                    height: 70,
+                                                    decoration: BoxDecoration(
+                                                      borderRadius:
+                                                          BorderRadius.circular(8),
+                                                      image: DecorationImage(
+                                                        image: FileImage(
+                                                            _capturedPhotos[i]),
+                                                        fit: BoxFit.cover,
+                                                      ),
+                                                    ),
                                                   ),
-                                                ),
+                                                  Positioned(
+                                                    top: 2,
+                                                    right: 10,
+                                                    child: GestureDetector(
+                                                      onTap: () =>
+                                                          _removeCapturedPhotoAt(i),
+                                                      child: Container(
+                                                        padding:
+                                                            const EdgeInsets.all(2),
+                                                        decoration:
+                                                            const BoxDecoration(
+                                                          color: Colors.black54,
+                                                          shape: BoxShape.circle,
+                                                        ),
+                                                        child: const Icon(
+                                                          Icons.close,
+                                                          color: Colors.white,
+                                                          size: 14,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
                                             ),
                                           ),
