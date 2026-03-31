@@ -145,6 +145,92 @@ static Future<List<dynamic>> HistoryList(String usr, String fromDate, String toD
     }
   }
 
+  static Future<String?> getParticipantVisitType({
+    required String eventName,
+    required String referenceDocname,
+    String referenceDoctype = 'Opportunity',
+    required BuildContext context,
+  }) async {
+    final pingResult = await Check.pingpong();
+    if (pingResult == false) {
+      Warning.show(
+        context,
+        'ERP Site is not in working condition! Please try again later.',
+        'Error',
+      );
+      return null;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final String? token = prefs.getString('token');
+    final siteUrl = dotenv.env['SITE_URL'];
+
+    if (siteUrl == null || siteUrl.isEmpty) {
+      return null;
+    }
+
+    try {
+      final uri = Uri.parse(
+        '$siteUrl/api/method/event'
+        '?reference_docname=$referenceDocname'
+        '&reference_doctype=$referenceDoctype',
+      );
+
+      final response = await http.get(
+        uri,
+        headers: {
+          "Authorization": token ?? "",
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      );
+
+      if (response.statusCode != 200) {
+        return null;
+      }
+
+      final data = json.decode(response.body);
+      final payload = data['data'];
+
+      if (payload is List) {
+        for (final item in payload) {
+          if (item is Map<String, dynamic>) {
+            final name = item['name']?.toString();
+            if (name == eventName) {
+              final visitType = item['visit_type']?.toString();
+              if (visitType != null && visitType.isNotEmpty) {
+                return visitType;
+              }
+            }
+          }
+        }
+
+        for (final item in payload) {
+          if (item is Map<String, dynamic>) {
+            final docname = item['reference_docname']?.toString();
+            if (docname == referenceDocname) {
+              final visitType = item['visit_type']?.toString();
+              if (visitType != null && visitType.isNotEmpty) {
+                return visitType;
+              }
+            }
+          }
+        }
+      }
+
+      if (payload is Map<String, dynamic>) {
+        final visitType = payload['visit_type']?.toString();
+        if (visitType != null && visitType.isNotEmpty) {
+          return visitType;
+        }
+      }
+
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   static Future<List<dynamic>> office_type_list(String usr, BuildContext context) async {
  final pingResult = await Check.pingpong();  
   if (pingResult == false) {
@@ -340,6 +426,51 @@ final pingResult = await Check.pingpong();
     );
 
     return json.decode(response.body);
+  }
+
+  static Future<bool> addEventComment({
+    required String eventId,
+    required String content,
+    required BuildContext context,
+  }) async {
+    final pingResult = await Check.pingpong();
+    if (pingResult == false) {
+      Warning.show(
+        context,
+        'ERP Site is not in working condition! Please try again later.',
+        'Error',
+      );
+      return false;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final String? token = prefs.getString('token');
+    final siteUrl = dotenv.env['SITE_URL'] ?? '';
+
+    if (token == null || token.isEmpty || siteUrl.isEmpty) {
+      return false;
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse('$siteUrl/api/resource/Comment'),
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode({
+          'comment_type': 'Comment',
+          'reference_doctype': 'Event',
+          'reference_name': eventId,
+          'content': content,
+        }),
+      );
+
+      return response.statusCode == 200 || response.statusCode == 201;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Future<void> sendOtp(event_id, BuildContext context) async {

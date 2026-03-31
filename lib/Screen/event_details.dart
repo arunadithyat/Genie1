@@ -39,6 +39,11 @@ class EventDetails extends StatefulWidget {
 
 class _EventDetailsState extends State<EventDetails> {
   Map<String, dynamic> eventData = {};
+  String? _participantVisitType;
+  File? capturedImage;
+  String? selectedLocationType;
+  final TextEditingController otherLocationController =
+      TextEditingController();
 
   bool _isLoading = false;
   bool _isActionInProgress = false;
@@ -150,6 +155,7 @@ class _EventDetailsState extends State<EventDetails> {
 
   @override
   void dispose() {
+    otherLocationController.dispose();
     _audioPlayer.dispose();
     GeofenceManager.instance.stopMonitoring();
     super.dispose();
@@ -199,6 +205,7 @@ class _EventDetailsState extends State<EventDetails> {
     if (file == null) return;
 
     setState(() {
+      capturedImage = file;
       _capturedPhotos.add(file);
       _isUploadingPhoto = true;
     });
@@ -224,6 +231,384 @@ class _EventDetailsState extends State<EventDetails> {
       }
     } finally {
       if (mounted) setState(() => _isUploadingPhoto = false);
+    }
+  }
+
+  void showLocationDialog(VoidCallback onSuccess) {
+    String? tempSelectedLocationType = selectedLocationType;
+    final tempOtherLocationController = TextEditingController(
+      text: otherLocationController.text,
+    );
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return PopScope(
+          canPop: false,
+          child: StatefulBuilder(
+            builder: (context, dialogSetState) {
+              return AlertDialog(
+                title: const Text("Select Location Type"),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    DropdownButton<String>(
+                      value: tempSelectedLocationType,
+                      hint: const Text("Select Location"),
+                      isExpanded: true,
+                      items: ["Site", "Office", "Home", "Others"]
+                          .map(
+                            (e) => DropdownMenuItem(
+                              value: e,
+                              child: Text(e),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        dialogSetState(() {
+                          tempSelectedLocationType = value;
+                          if (value != "Others") {
+                            tempOtherLocationController.clear();
+                          }
+                        });
+                      },
+                    ),
+                    if (tempSelectedLocationType == "Others")
+                      TextField(
+                        controller: tempOtherLocationController,
+                        decoration: const InputDecoration(
+                          hintText: "Enter location",
+                        ),
+                      ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      tempOtherLocationController.dispose();
+                      Navigator.pop(context);
+                    },
+                    child: const Text("Cancel"),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      if (tempSelectedLocationType == null) return;
+
+                      if (tempSelectedLocationType == "Others" &&
+                          tempOtherLocationController.text.trim().isEmpty) {
+                        return;
+                      }
+
+                      setState(() {
+                        selectedLocationType = tempSelectedLocationType;
+                        otherLocationController.text =
+                            tempOtherLocationController.text.trim();
+                      });
+
+                      tempOtherLocationController.dispose();
+                      Navigator.pop(context);
+                      onSuccess();
+                    },
+                    child: const Text("OK"),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  bool _isSiteVisitEvent() {
+    return eventData['event']?['event_category'] == "Other";
+  }
+
+  Map<String, dynamic>? _getPrimaryParticipant() {
+    final participants = eventData['reference_details'];
+    if (participants is List && participants.isNotEmpty) {
+      final first = participants.first;
+      if (first is Map) {
+        return Map<String, dynamic>.from(first);
+      }
+    }
+    return null;
+  }
+
+  String _getParticipantVisitType() {
+    if (_participantVisitType != null && _participantVisitType!.isNotEmpty) {
+      return _participantVisitType!;
+    }
+
+    final participant = _getPrimaryParticipant();
+    final localVisitType = participant?['visit_type']?.toString();
+    if (localVisitType != null && localVisitType.isNotEmpty) {
+      return localVisitType;
+    }
+
+    return 'New';
+  }
+
+  bool _isNewVisit() => _getParticipantVisitType().toLowerCase() == 'new';
+
+  bool _requiresLocationBeforeCheckout() {
+    return _isSiteVisitEvent() && _isNewVisit();
+  }
+
+  bool _requiresPhotoBeforeCheckout() {
+    return _isSiteVisitEvent();
+  }
+
+  bool _requiresLocationBeforeCheckIn() {
+    return _isSiteVisitEvent() && !_isNewVisit();
+  }
+
+  LatLng? _getMockLocationCoordinates(String? locationType) {
+    switch (locationType) {
+      case "Site":
+        return const LatLng(10.8665226, 78.6406467);
+      default:
+        return null;
+    }
+  }
+
+  bool _isWithinAllowedLocation({
+    required double currentLat,
+    required double currentLng,
+  }) {
+    final target = _getMockLocationCoordinates(selectedLocationType);
+    if (target == null) {
+      return true;
+    }
+
+    final distance = Geolocator.distanceBetween(
+      currentLat,
+      currentLng,
+      target.latitude,
+      target.longitude,
+    );
+
+    return distance <= 100;
+  }
+
+  void _resetSelectedLocation() {
+    selectedLocationType = null;
+    otherLocationController.clear();
+  }
+
+  String _getSelectedLocationValue() {
+    if (selectedLocationType == "Others") {
+      return otherLocationController.text.trim();
+    }
+    return selectedLocationType ?? '';
+  }
+
+  String _buildFirstVisitLocationComment() {
+    final customLocation = eventData['event']?['custom_location']?.toString() ?? '';
+    final label = _getSelectedLocationValue().isEmpty
+        ? (selectedLocationType ?? 'Location')
+        : _getSelectedLocationValue();
+    final locationValue = customLocation.isEmpty ? '-' : customLocation;
+
+    return '$label : $locationValue';
+  }
+
+  Future<void> performCheckIn({
+    required String? userEmail,
+    required String eventId,
+    required double lat,
+    required double lng,
+    required String address,
+  }) async {
+    if (_requiresLocationBeforeCheckIn() && selectedLocationType == null) {
+      Warning.show(
+        context,
+        "Please select a location before check-in.",
+        "Location Required",
+      );
+      return;
+    }
+
+    if (_requiresLocationBeforeCheckIn() &&
+        !_isWithinAllowedLocation(
+          currentLat: lat,
+          currentLng: lng,
+        )) {
+      Warning.show(
+        context,
+        "You are not within 100m of the selected location. Check-in is restricted.",
+        "Location Restriction",
+      );
+      return;
+    }
+
+    final response = await Event.eventCheckin(
+      userEmail,
+      eventId,
+      lat,
+      lng,
+      address,
+      context,
+    );
+
+    if (response['message'] != null) {
+      if (response['message']['status'] == "success") {
+        Warning.show(
+          context,
+          response['message']['message'],
+          "Success",
+        );
+        await prefs.setBool(
+          'with_event',
+          true,
+        );
+        await _startGeofenceForEvent(lat, lng);
+        _fetchData();
+      } else if (response['message']['status'] == "error") {
+        Warning.show(
+          context,
+          response['message']['message'],
+          "Error",
+        );
+      }
+    }
+  }
+
+  Future<void> performCheckout({
+    required String? userEmail,
+    required String eventId,
+    required double lat,
+    required double lng,
+    required String address,
+    required String workingHrs,
+    required Position position,
+  }) async {
+    bool isOtpRequired = await Event.checkIfOtpRequired(
+      widget.eventid,
+      context,
+    );
+
+    if (isOtpRequired) {
+      bool confirmed = await showOTPDialog(
+        context,
+      );
+
+      if (!confirmed) {
+        Warning.show(
+          context,
+          "OTP verification failed. Cannot proceed.",
+          "Error",
+        );
+        return;
+      }
+    }
+
+    LocationTrackerService.stopTracking();
+    double distance = LocationTrackerService.calculateTotalDistance();
+
+    String formattedDistanceWithUnit;
+
+    if (distance >= 1000) {
+      double km = distance / 1000;
+      formattedDistanceWithUnit = '${km.toStringAsFixed(2)} km';
+    } else {
+      formattedDistanceWithUnit = '${distance.toStringAsFixed(2)} m';
+    }
+
+    List<LatLng> path = LocationTrackerService.getTrackedPoints();
+
+    List<Map<String, dynamic>> locationLogs =
+        path
+            .map(
+              (latLng) => {
+                'latitude': latLng.latitude,
+                'longitude': latLng.longitude,
+              },
+            )
+            .toList();
+
+    final lastLatLng = prefs.getString(
+          'last_lat_lng',
+        ) ??
+        '';
+
+    final response = await Event.eventCheckout(
+      userEmail,
+      eventId,
+      lat,
+      lng,
+      address,
+      workingHrs,
+      formattedDistanceWithUnit,
+      lastLatLng,
+      jsonEncode(
+        locationLogs,
+      ),
+      context,
+    );
+    if (response['message'] != null) {
+      if (response['message']['status'] == "success") {
+        LocationTrackerService.startTracking(
+          start: LatLng(
+            position.latitude,
+            position.longitude,
+          ),
+        );
+
+        Warning.show(
+          context,
+          response['message']['message'],
+          "Success",
+        );
+        await prefs.setString(
+          'last_checkout_address',
+          address,
+        );
+
+        await prefs.setString(
+          'last_lat_lng',
+          '$lat,$lng',
+        );
+
+        _fetchData();
+
+        if (AudioRecordingService().isRecording) {
+          await AudioRecordingService().stopRecording();
+        }
+
+        final paths = AudioRecordingService().getAllRecordingPaths();
+        if (paths.isNotEmpty) {
+          for (final path in paths) {
+            if (File(path).existsSync()) {
+              await uploadAudioToERPNext(
+                filePath: path,
+                doctype: 'Event',
+                docname: widget.eventid,
+                baseUrl: dotenv.env['SITE_URL'] ?? '',
+              );
+            } else {
+              print(
+                "âš ï¸ Skipping missing file: $path",
+              );
+            }
+          }
+
+          AudioRecordingService().resetRecordings();
+        } else {
+          Warning.show(
+            context,
+            "Audio file not found. Checkout will continue without recording.",
+            "Warning",
+          );
+        }
+      } else {
+        Warning.show(
+          context,
+          "Already checked in and out",
+          "",
+        );
+      }
     }
   }
 
@@ -297,6 +682,8 @@ class _EventDetailsState extends State<EventDetails> {
   Future<void> _fetchData() async {
     setState(() {
       _isLoading = true;
+      _resetSelectedLocation();
+      _participantVisitType = null;
     });
 
     await Future.wait([_fetchEventDetails()]);
@@ -304,6 +691,39 @@ class _EventDetailsState extends State<EventDetails> {
     setState(() {
       _isLoading = false;
     });
+  }
+
+  Future<void> _loadParticipantVisitType() async {
+    final participant = _getPrimaryParticipant();
+    final referenceDocname =
+        participant?['mention']?.toString() ??
+        participant?['reference_docname']?.toString() ??
+        participant?['opportunity_from']?.toString() ??
+        participant?['party_name']?.toString();
+    final referenceDoctype =
+        participant?['reference_doctype']?.toString() ?? 'Opportunity';
+
+    if (referenceDocname == null || referenceDocname.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _participantVisitType = 'New';
+        });
+      }
+      return;
+    }
+
+    final visitType = await Event.getParticipantVisitType(
+      eventName: widget.eventid,
+      referenceDocname: referenceDocname,
+      referenceDoctype: referenceDoctype,
+      context: context,
+    );
+
+    if (mounted) {
+      setState(() {
+        _participantVisitType = visitType ?? _getParticipantVisitType();
+      });
+    }
   }
 
 String _formatTime(String? dateTime) {
@@ -345,6 +765,7 @@ String _formatTime(String? dateTime) {
       setState(() {
         eventData = response;
       });
+      await _loadParticipantVisitType();
     }
   }
 
@@ -780,27 +1201,28 @@ String _formatTime(String? dateTime) {
                                                 setState(() {
                                                   _isActionInProgress = true;
                                                 });
-                                                if (!_isTodayEvent()) {
-                                                  Warning.show(
-                                                    context,
-                                                    'You can only check in/out on the event day.',
-                                                    'Invalid Date',
-                                                  );
-                                                  return;
-                                                }
-
-                                                final userEmail = prefs
-                                                    .getString(
-                                                      'email',
-                                                    );
-                                                final eventId = widget.eventid;
-                                                String? checkIn =
-                                                    eventData['event']['custom_check_in'];
-                                                String? checkOut =
-                                                    eventData['event']['custom_check_out'];
-
-                                                Position position;
                                                 try {
+                                                  if (!_isTodayEvent()) {
+                                                    Warning.show(
+                                                      context,
+                                                      'You can only check in/out on the event day.',
+                                                      'Invalid Date',
+                                                    );
+                                                    return;
+                                                  }
+
+                                                  final userEmail = prefs
+                                                      .getString(
+                                                        'email',
+                                                      );
+                                                  final eventId =
+                                                      widget.eventid;
+                                                  String? checkIn =
+                                                      eventData['event']['custom_check_in'];
+                                                  String? checkOut =
+                                                      eventData['event']['custom_check_out'];
+
+                                                  Position position;
                                                   bool serviceEnabled =
                                                       await Geolocator.isLocationServiceEnabled();
                                                   if (!serviceEnabled) {
@@ -884,45 +1306,136 @@ String _formatTime(String? dateTime) {
                                                           checkIn.isEmpty) &&
                                                       (checkOut == null ||
                                                           checkOut.isEmpty)) {
-                                                    final response =
-                                                        await Event.eventCheckin(
-                                                          userEmail,
-                                                          eventId,
-                                                          lat,
-                                                          lng,
-                                                          address,
-                                                          context,
-                                                        );
+                                                    if (_requiresLocationBeforeCheckIn()) {
+                                                      if (selectedLocationType ==
+                                                          null) {
+                                                        showLocationDialog(() {
+                                                          if (mounted) {
+                                                            setState(() {
+                                                              _isActionInProgress =
+                                                                  true;
+                                                            });
+                                                          }
+                                                          performCheckIn(
+                                                            userEmail:
+                                                                userEmail,
+                                                            eventId: eventId,
+                                                            lat: lat,
+                                                            lng: lng,
+                                                            address: address,
+                                                          ).whenComplete(() {
+                                                            if (mounted) {
+                                                              setState(() {
+                                                                _isActionInProgress =
+                                                                    false;
+                                                              });
+                                                            }
+                                                          });
+                                                        });
+                                                        return;
+                                                      }
 
-                                                    if (response['message'] !=
-                                                        null) {
-                                                      if (response['message']['status'] ==
-                                                          "success") {
-                                                        Warning.show(
+                                                      if (selectedLocationType ==
+                                                              "Others" &&
+                                                          otherLocationController
+                                                              .text
+                                                              .trim()
+                                                              .isEmpty) {
+                                                        ScaffoldMessenger.of(
                                                           context,
-                                                          response['message']['message'],
-                                                          "Success",
+                                                        ).showSnackBar(
+                                                          const SnackBar(
+                                                            content: Text(
+                                                              "Enter location",
+                                                            ),
+                                                          ),
                                                         );
-                                                        await prefs.setBool(
-                                                          'with_event',
-                                                          true,
-                                                        );
-                                                        await _startGeofenceForEvent(lat, lng);
-                                                        _fetchData();
-                                                        
-                                                      } else if (response['message']['status'] ==
-                                                          "error") {
-                                                        Warning.show(
-                                                          context,
-                                                          response['message']['message'],
-                                                          "Error",
-                                                        );
+                                                        return;
                                                       }
                                                     }
+
+                                                    await performCheckIn(
+                                                      userEmail: userEmail,
+                                                      eventId: eventId,
+                                                      lat: lat,
+                                                      lng: lng,
+                                                      address: address,
+                                                    );
+                                                    
                                                   } else if ((checkIn != null &&
                                                           checkIn.isNotEmpty) &&
                                                       (checkOut == null ||
                                                           checkOut.isEmpty)) {
+                                                    if (_requiresLocationBeforeCheckout()) {
+                                                      if (selectedLocationType ==
+                                                          null) {
+                                                        showLocationDialog(() {
+                                                          if (_requiresPhotoBeforeCheckout() &&
+                                                              capturedImage ==
+                                                                  null) {
+                                                            ScaffoldMessenger.of(
+                                                              context,
+                                                            ).showSnackBar(
+                                                              const SnackBar(
+                                                                content: Text(
+                                                                  "Capture image before checkout",
+                                                                ),
+                                                              ),
+                                                            );
+                                                            return;
+                                                          }
+
+                                                          performCheckout(
+                                                            userEmail:
+                                                                userEmail,
+                                                            eventId: eventId,
+                                                            lat: lat,
+                                                            lng: lng,
+                                                            address: address,
+                                                            workingHrs:
+                                                                working_hrs,
+                                                            position:
+                                                                position,
+                                                          );
+                                                        });
+                                                        return;
+                                                      }
+
+                                                      if (selectedLocationType ==
+                                                              "Others" &&
+                                                          otherLocationController
+                                                              .text
+                                                              .trim()
+                                                              .isEmpty) {
+                                                        ScaffoldMessenger.of(
+                                                          context,
+                                                        ).showSnackBar(
+                                                          const SnackBar(
+                                                            content: Text(
+                                                              "Enter location",
+                                                            ),
+                                                          ),
+                                                        );
+                                                        return;
+                                                      }
+                                                    }
+
+                                                    if (_requiresPhotoBeforeCheckout()) {
+                                                      if (capturedImage ==
+                                                          null) {
+                                                        ScaffoldMessenger.of(
+                                                          context,
+                                                        ).showSnackBar(
+                                                          const SnackBar(
+                                                            content: Text(
+                                                              "Capture image before checkout",
+                                                            ),
+                                                          ),
+                                                        );
+                                                        return;
+                                                      }
+                                                    }
+
                                                     bool isOtpRequired =
                                                         await Event.checkIfOtpRequired(
                                                           widget.eventid,
@@ -1028,6 +1541,15 @@ String _formatTime(String? dateTime) {
                                                           '$lat,$lng',
                                                         );
 
+                                                        if (_requiresLocationBeforeCheckout()) {
+                                                          await Event.addEventComment(
+                                                            eventId: eventId,
+                                                            content:
+                                                                _buildFirstVisitLocationComment(),
+                                                            context: context,
+                                                          );
+                                                        }
+
                                                         _fetchData();
 
                                                         if (AudioRecordingService()
@@ -1090,9 +1612,11 @@ String _formatTime(String? dateTime) {
                                                     "Error",
                                                   );
                                                 } finally {
-                                                  setState(() {
-                                                    _isActionInProgress = false;
-                                                  });
+                                                  if (mounted) {
+                                                    setState(() {
+                                                      _isActionInProgress = false;
+                                                    });
+                                                  }
                                                 }
                                               },
 
@@ -1220,59 +1744,84 @@ String _formatTime(String? dateTime) {
                                         ],
 
                                         // ── Camera capture button ──────────
-                                        const SizedBox(height: 12),
-                                        _isUploadingPhoto
-                                            ? const Row(
-                                                mainAxisAlignment:
-                                                    MainAxisAlignment.center,
-                                                children: [
-                                                  SizedBox(
-                                                    width: 20,
-                                                    height: 20,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                      strokeWidth: 2,
+                                        if (eventData['event']
+                                                    ?['custom_check_in'] !=
+                                                null &&
+                                            (eventData['event']
+                                                        ?['custom_check_out'] ==
+                                                    null ||
+                                                eventData['event']
+                                                        ?['custom_check_out']
+                                                    .isEmpty) &&
+                                            _requiresPhotoBeforeCheckout()) ...[
+                                          const SizedBox(height: 12),
+                                          _isUploadingPhoto
+                                              ? const Row(
+                                                  mainAxisAlignment:
+                                                      MainAxisAlignment.center,
+                                                  children: [
+                                                    SizedBox(
+                                                      width: 20,
+                                                      height: 20,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                      ),
+                                                    ),
+                                                    SizedBox(width: 10),
+                                                    Text('Uploading photo...'),
+                                                  ],
+                                                )
+                                              : ElevatedButton.icon(
+                                                  icon: const Icon(
+                                                    Icons.camera_alt,
+                                                    color: Colors.white,
+                                                    size: 20,
+                                                  ),
+                                                  label: Text(
+                                                    _capturedPhotos.isEmpty
+                                                        ? 'Capture Photo'
+                                                        : 'Capture Photo (${_capturedPhotos.length})',
+                                                    style: const TextStyle(
+                                                      fontSize: 15,
+                                                      fontWeight:
+                                                          FontWeight.w600,
                                                     ),
                                                   ),
-                                                  SizedBox(width: 10),
-                                                  Text('Uploading photo...'),
-                                                ],
-                                              )
-                                            : ElevatedButton.icon(
-                                                icon: const Icon(
-                                                  Icons.camera_alt,
-                                                  color: Colors.white,
-                                                  size: 20,
-                                                ),
-                                                label: Text(
-                                                  _capturedPhotos.isEmpty
-                                                      ? 'Capture Photo'
-                                                      : 'Capture Photo (${_capturedPhotos.length})',
-                                                  style: const TextStyle(
-                                                    fontSize: 15,
-                                                    fontWeight: FontWeight.w600,
+                                                  style:
+                                                      ElevatedButton.styleFrom(
+                                                    backgroundColor:
+                                                        Colors.indigo,
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                      horizontal: 18,
+                                                      vertical: 10,
+                                                    ),
+                                                    shape:
+                                                        RoundedRectangleBorder(
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              25),
+                                                    ),
+                                                    elevation: 4,
                                                   ),
+                                                  onPressed:
+                                                      _captureAndUploadPhoto,
                                                 ),
-                                                style: ElevatedButton.styleFrom(
-                                                  backgroundColor: Colors.indigo,
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                    horizontal: 18,
-                                                    vertical: 10,
-                                                  ),
-                                                  shape: RoundedRectangleBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                            25),
-                                                  ),
-                                                  elevation: 4,
-                                                ),
-                                                onPressed:
-                                                    _captureAndUploadPhoto,
-                                              ),
+                                        ],
 
                                         // Thumbnail preview of captured photos
-                                        if (_capturedPhotos.isNotEmpty) ...[
+                                        if (eventData['event']
+                                                    ?['custom_check_in'] !=
+                                                null &&
+                                            (eventData['event']
+                                                        ?['custom_check_out'] ==
+                                                    null ||
+                                                eventData['event']
+                                                        ?['custom_check_out']
+                                                    .isEmpty) &&
+                                            _requiresPhotoBeforeCheckout() &&
+                                            _capturedPhotos.isNotEmpty) ...[
                                           const SizedBox(height: 10),
                                           SizedBox(
                                             height: 70,
